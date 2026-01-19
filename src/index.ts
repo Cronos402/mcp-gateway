@@ -158,10 +158,19 @@ async function buildMonetizationForTarget(targetUrl: string): Promise<{
     }
 }
 
-// Initialize Redis store at startup
-void initializeStore();
+// Initialize Redis store at startup with proper error handling
+initializeStore().catch((error) => {
+    console.error('[MCP-Gateway] Failed to initialize Redis store:', error);
+    process.exit(1);
+});
 
 const app = new Hono();
+
+// Global error handler - prevents server crashes
+app.onError((err, c) => {
+    console.error('[MCP-Gateway] Unhandled error:', err);
+    return c.json({ error: err.message || 'Internal server error' }, 500);
+});
 app.use("*", cors({
     origin: ['http://localhost:3000', 'http://localhost:3002', 'http://localhost:3005'],
     credentials: true,

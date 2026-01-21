@@ -16,7 +16,7 @@
     "dotenv": "^17.2.3",
     "get-port": "^7.1.0",
     "hono": "^4.9.9",
-    "cronos402": "workspace:*",
+    "cronos402": "^0.1.0",
     "zod": "^4.1.11"
   },
   "devDependencies": {

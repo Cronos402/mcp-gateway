@@ -222,7 +222,19 @@ app.post("/register", async (c) => {
 
     try {
         const saved = await redisStore.upsertServerConfig(input as StoredServerConfig);
-        // No console logging
+
+        // Also sync to indexer (PostgreSQL) for explorer page
+        const INDEXER_URL = process.env.INDEXER_URL ?? 'http://localhost:3010';
+        try {
+            await fetch(`${INDEXER_URL}/index/run`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ origin: mcpOrigin }),
+            });
+        } catch (indexerErr) {
+            console.warn('[Register] Failed to sync to indexer:', indexerErr);
+        }
+
         return c.json({ ok: true, id: saved.id });
     } catch (error) {
         // No console logging
@@ -397,24 +409,23 @@ app.get("/server/:id", async (c) => {
     }
 });
 
-// Explorer endpoint (stats/analytics - stub for now)
+// Explorer endpoint - proxy to indexer (PostgreSQL) for RPC logs/payments
 app.get("/explorer", async (c) => {
     try {
+        const INDEXER_URL = process.env.INDEXER_URL ?? 'http://localhost:3010';
         const url = new URL(c.req.url);
-        const limit = parseInt(url.searchParams.get("limit") || "20");
-        const offset = parseInt(url.searchParams.get("offset") || "0");
+        const queryString = url.search || '';
 
-        // Return empty stats for now - can be enhanced later with actual tracking
-        return c.json({
-            stats: [],
-            total: 0,
-            limit,
-            offset,
-            nextOffset: null,
-            hasMore: false,
+        const response = await fetch(`${INDEXER_URL}/explorer${queryString}`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
         });
+
+        const data = await response.json();
+        return c.json(data);
     } catch (error) {
-        return c.json({ error: "failed_to_get_explorer" }, 500);
+        console.error('[Explorer] Failed to proxy to indexer:', error);
+        return c.json({ stats: [], total: 0, limit: 20, offset: 0, nextOffset: null, hasMore: false });
     }
 });
 
@@ -490,6 +501,35 @@ app.post("/index/run", async (c) => {
     }
 });
 
+// Sync all Redis servers to the indexer (PostgreSQL) for explorer
+app.post("/sync", async (c) => {
+    try {
+        const INDEXER_URL = process.env.INDEXER_URL ?? 'http://localhost:3010';
+        const store = await redisStore.loadStore();
+        const allServers = Object.values(store.serversById);
+
+        let synced = 0;
+        let failed = 0;
+
+        for (const server of allServers) {
+            try {
+                await fetch(`${INDEXER_URL}/index/run`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ origin: server.mcpOrigin }),
+                });
+                synced++;
+            } catch {
+                failed++;
+            }
+        }
+
+        return c.json({ ok: true, synced, failed, total: allServers.length });
+    } catch (error) {
+        return c.json({ error: "failed_to_sync" }, 500);
+    }
+});
+
 // app.get("/servers/:id", async (c) => {
 //     const id = c.req.param("id");
 //     try {
@@ -557,13 +597,16 @@ app.all("/mcp", async (c) => {
     // Use Cronos facilitator for x402 payments
     const CRONOS_FACILITATOR_URL = "https://facilitator.cronoslabs.org/v2/x402";
 
-    // Analytics sink - automatically captures ALL tool calls and stores to Redis
+    // Indexer URL for forwarding analytics (explorer data)
+    const INDEXER_URL = process.env.INDEXER_URL ?? 'http://localhost:3010';
+
+    // Analytics sink - automatically captures ALL tool calls and stores to Redis + forwards to indexer
     const analyticsSink = async (event: Record<string, unknown>) => {
         try {
             const meta = event.meta as { res?: unknown; req?: unknown } | undefined;
             const toolName = (meta?.req as { params?: { name?: string } })?.params?.name;
 
-            // Store the RPC log
+            // Store the RPC log in Redis
             const log = await redisStore.storeRpcLog({
                 serverId: serverId,
                 method: event.method as string,
@@ -572,6 +615,26 @@ app.all("/mcp", async (c) => {
                 response: meta?.res,
                 meta: event,
             });
+
+            // Forward to indexer for PostgreSQL storage (explorer page)
+            try {
+                await fetch(`${INDEXER_URL}/ingest/rpc`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ts: event.ts,
+                        serverId: serverId,
+                        origin: targetUrl,
+                        method: event.method,
+                        request: meta?.req,
+                        response: meta?.res,
+                        meta: event,
+                    }),
+                });
+            } catch (indexerErr) {
+                // Don't fail if indexer is down
+                console.warn('[AnalyticsSink] Failed to forward to indexer:', indexerErr);
+            }
 
             // Detect and record payment from the log
             const payment = redisStore.detectPaymentFromLog(log);

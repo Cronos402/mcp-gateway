@@ -172,7 +172,14 @@ app.onError((err, c) => {
     return c.json({ error: err.message || 'Internal server error' }, 500);
 });
 app.use("*", cors({
-    origin: ['http://localhost:3000', 'http://localhost:3002', 'http://localhost:3005'],
+    origin: [
+        'http://localhost:3000',
+        'http://localhost:3002',
+        'http://localhost:3005',
+        'https://cronos402.dev',
+        'https://www.cronos402.dev',
+        'https://gateway.cronos402.dev',
+    ],
     credentials: true,
 }));
 
